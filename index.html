@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>GTA V: COLLISION UPDATE</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; user-select: none; }
+        
+        /* HUD */
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+        
+        #hud-top-right { position: absolute; top: 30px; right: 30px; text-align: right; }
+        .stat-row { display: flex; align-items: center; justify-content: flex-end; margin-bottom: 10px; }
+        .stat-val { font-size: 30px; font-weight: 900; color: #fff; text-shadow: 0 2px 0 #000; font-style: italic; }
+        .stat-label { font-size: 14px; color: #bbb; margin-right: 10px; font-weight: bold; text-transform: uppercase; }
+        #money { color: #2ecc71; }
+        
+        #wanted-stars { color: white; font-size: 25px; opacity: 0; transition: opacity 0.5s; text-shadow: 0 0 10px red; }
+        .star { display: inline-block; }
+        .star.active { color: #e74c3c; }
+
+        /* MINIMAP */
+        #minimap-border { position: absolute; bottom: 30px; left: 30px; width: 200px; height: 140px; border: 4px solid #000; background: #2c3e50; overflow: hidden; border-radius: 5px; box-shadow: 0 0 15px rgba(0,0,0,0.5); }
+        #minimap-content { position: relative; width: 100%; height: 100%; }
+        .map-icon { position: absolute; width: 8px; height: 8px; border-radius: 50%; transform: translate(-50%, -50%); }
+
+        /* INTERACTION */
+        #interact-msg {
+            position: absolute; top: 20px; left: 20px;
+            background: rgba(0,0,0,0.8); color: white; padding: 10px 20px;
+            font-weight: bold; border-left: 5px solid #f1c40f; display: none;
+        }
+
+        #crosshair {
+            position: absolute; top: 50%; left: 50%; width: 4px; height: 4px; background: white; 
+            border: 1px solid black; border-radius: 50%; transform: translate(-50%, -50%);
+        }
+
+        #controls-help {
+            position: absolute; bottom: 30px; right: 30px; color: rgba(255,255,255,0.5); font-size: 12px; text-align: right;
+        }
+        
+        #crash-flash {
+            position: absolute; top:0; left:0; width:100%; height:100%; background:white; opacity:0; pointer-events:none; transition: opacity 0.1s;
+        }
+    </style>
+</head>
+<body>
+
+<div id="crash-flash"></div>
+
+<div id="ui-layer">
+    <div id="crosshair"></div>
+    
+    <div id="hud-top-right">
+        <div id="wanted-stars">
+            <span class="star">★</span><span class="star">★</span><span class="star">★</span><span class="star">★</span><span class="star">★</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Cash</span>
+            <span class="stat-val" id="money">$250</span>
+        </div>
+        <div class="stat-row">
+            <span id="weapon-name" class="stat-label">Pistol</span>
+            <span class="stat-val" id="ammo">12/∞</span>
+        </div>
+    </div>
+
+    <div id="minimap-border"><div id="minimap-content"></div></div>
+    <div id="interact-msg">PRESS [E] TO INTERACT</div>
+    
+    <div id="controls-help">
+        [WASD] Move | [F] Car | [SHIFT] Sprint | [CLICK] Shoot
+    </div>
+</div>
+
+<script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+</script>
+
+<script type="module">
+    import * as THREE from 'three';
+    import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+    // --- SOUND ENGINE (Synthesized) ---
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    function playSound(type) {
+        if(audioCtx.state === 'suspended') audioCtx.resume();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        if(type === 'crash') {
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(100, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(10, audioCtx.currentTime + 0.3);
+            gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+            osc.start(); osc.stop(audioCtx.currentTime + 0.3);
+        } else if(type === 'shoot') {
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+            gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+            osc.start(); osc.stop(audioCtx.currentTime + 0.1);
+        }
+    }
+
+    // --- SETUP ---
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87CEEB);
+    scene.fog = new THREE.Fog(0x87CEEB, 20, 150);
+
+    const camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+    sun.position.set(100, 200, 50);
+    sun.castShadow = true;
+    sun.shadow.camera.left = -100; sun.shadow.camera.right = 100;
+    sun.shadow.camera.top = 100; sun.shadow.camera.bottom = -100;
+    sun.shadow.mapSize.set(2048, 2048);
+    scene.add(sun);
+    scene.add(new THREE.AmbientLight(0x404040));
+
+    // --- COLLISION SYSTEM ---
+    // We store Pre-calculated Bounding Boxes for every building
+    const staticColliders = []; 
+
+    function checkCollision(position, radius) {
+        // Create a temporary sphere for the player/car at the new position
+        const playerSphere = new THREE.Sphere(position, radius);
+        
+        for(let box of staticColliders) {
+            if(box.intersectsSphere(playerSphere)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // --- ASSETS & CITY ---
+    function makeTex(col) {
+        const c = document.createElement('canvas'); c.width=64; c.height=64;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = col; ctx.fillRect(0,0,64,64);
+        ctx.fillStyle = 'rgba(255,255,255,0.1)';
+        ctx.fillRect(Math.random()*60, Math.random()*60, 4, 4);
+        const t = new THREE.CanvasTexture(c);
+        t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        return t;
+    }
+    const texGrass = makeTex('#2ecc71'); texGrass.repeat.set(40,40);
+    const texRoad = makeTex('#34495e');
+    const texBuild = makeTex('#95a5a6');
+
+    const city = new THREE.Group();
+    scene.add(city);
+
+    // Ground
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(1000, 1000), new THREE.MeshStandardMaterial({map: texGrass}));
+    ground.rotation.x = -Math.PI/2;
+    ground.receiveShadow = true;
+    city.add(ground);
+
+    // Grid Generation with Colliders
+    for(let x=-150; x<=150; x+=30) {
+        for(let z=-150; z<=150; z+=30) {
+            // Road
+            const road = new THREE.Mesh(new THREE.PlaneGeometry(30, 30), new THREE.MeshStandardMaterial({map: texRoad}));
+            road.rotation.x = -Math.PI/2;
+            road.position.set(x, 0.05, z);
+            road.receiveShadow = true;
+            city.add(road);
+
+            // Building
+            if(Math.random() > 0.3) {
+                const h = Math.random() * 30 + 10;
+                const geo = new THREE.BoxGeometry(20, h, 20);
+                const b = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({map: texBuild}));
+                b.position.set(x, h/2, z);
+                b.castShadow = true; b.receiveShadow = true;
+                city.add(b);
+                
+                // *** ADD TO COLLISION SYSTEM ***
+                // We create a Box3 (Bounding Box) that represents this building in math
+                const bbox = new THREE.Box3().setFromObject(b);
+                staticColliders.push(bbox);
+            }
+        }
+    }
+
+    // --- CAR SETUP ---
+    function createCar() {
+        const car = new THREE.Group();
+        const red = new THREE.MeshStandardMaterial({color: 0xc0392b});
+        const glass = new THREE.MeshStandardMaterial({color: 0x111111});
+        
+        const body = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.7, 4.2), red);
+        body.position.y = 0.6; body.castShadow = true; car.add(body);
+        
+        const roof = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.5, 2.0), glass);
+        roof.position.set(0, 1.1, -0.2); car.add(roof);
+
+        const wGeo = new THREE.CylinderGeometry(0.35, 0.35, 0.3, 16);
+        const wMat = new THREE.MeshStandardMaterial({color: 0x222});
+        [[-0.8, 1.2], [0.8, 1.2], [-0.8, -1.2], [0.8, -1.2]].forEach(p => {
+            const w = new THREE.Mesh(wGeo, wMat);
+            w.rotation.z = Math.PI/2; w.position.set(p[0], 0.35, p[1]); car.add(w);
+        });
+
+        const hl = new THREE.SpotLight(0xffffff, 10, 30, 0.5);
+        hl.position.set(0, 0.8, -1.5); hl.target.position.set(0, 0, -10);
+        car.add(hl); car.add(hl.target);
+
+        return car;
+    }
+    const myCar = createCar();
+    myCar.position.set(10, 0, 10);
+    scene.add(myCar);
+
+    // --- PLAYER SETUP ---
+    const playerMesh = new THREE.Mesh(new THREE.BoxGeometry(0.8, 1.8, 0.8), new THREE.MeshStandardMaterial({color: 0x3498db}));
+    playerMesh.position.set(0, 0.9, 0);
+    playerMesh.castShadow = true;
+    scene.add(playerMesh);
+
+    // Weapon
+    const gun = new THREE.Group();
+    const gBody = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.15, 0.4), new THREE.MeshStandardMaterial({color: 0x333}));
+    gBody.position.set(0.3, -0.3, -0.5);
+    gun.add(gBody);
+    camera.add(gun);
+
+    // --- GAME STATE ---
+    let state = { inCar: false, money: 250, ammo: 12, wanted: 0 };
+    const physics = { pVel: new THREE.Vector3(), cSpeed: 0, cSteer: 0 };
+    const keys = { w:0, a:0, s:0, d:0, sp:0, sh:0 };
+    const controls = new PointerLockControls(camera, document.body);
+
+    document.addEventListener('click', () => { if(!controls.isLocked) controls.lock(); else shoot(); });
+    document.addEventListener('keydown', e => { 
+        const k = e.key.toLowerCase();
+        if(keys[k] !== undefined) keys[k] = 1; 
+        if(k===' ') keys.sp=1; if(k==='shift') keys.sh=1; if(k==='f') toggleVehicle(); 
+    });
+    document.addEventListener('keyup', e => { 
+        const k = e.key.toLowerCase();
+        if(keys[k] !== undefined) keys[k] = 0; 
+        if(k===' ') keys.sp=0; if(k==='shift') keys.sh=0; 
+    });
+
+    function toggleVehicle() {
+        const dist = playerMesh.position.distanceTo(myCar.position);
+        if(state.inCar) {
+            state.inCar = false;
+            const offset = new THREE.Vector3(-2, 0, 0).applyAxisAngle(new THREE.Vector3(0,1,0), myCar.rotation.y);
+            // Check if exit position is inside a wall
+            const exitPos = myCar.position.clone().add(offset);
+            if(!checkCollision(exitPos, 0.5)) {
+                playerMesh.position.copy(exitPos);
+                playerMesh.position.y = 1;
+                playerMesh.visible = true;
+                scene.add(camera);
+                gun.visible = true;
+            } else {
+                // Try other side
+                 playerMesh.position.copy(myCar.position).add(new THREE.Vector3(2,0,0));
+                 playerMesh.position.y = 1;
+                 playerMesh.visible = true;
+                 scene.add(camera);
+                 gun.visible = true;
+            }
+            physics.pVel.set(0,0,0);
+        } else if(dist < 4) {
+            state.inCar = true;
+            playerMesh.visible = false;
+            gun.visible = false;
+        }
+    }
+
+    function shoot() {
+        if(state.inCar || state.ammo <= 0) return;
+        state.ammo--;
+        playSound('shoot');
+        gun.rotation.x += 0.2;
+        updateHUD();
+    }
+
+    function updateHUD() {
+        document.getElementById('money').innerText = `$${state.money}`;
+        document.getElementById('ammo').innerText = `${state.ammo}/∞`;
+    }
+
+    // --- MAIN LOOP ---
+    const clock = new THREE.Clock();
+    
+    function animate() {
+        requestAnimationFrame(animate);
+        const dt = Math.min(clock.getDelta(), 0.1);
+
+        gun.rotation.x = THREE.MathUtils.lerp(gun.rotation.x, 0, dt * 10);
+
+        if(state.inCar) {
+            // --- CAR PHYSICS & COLLISION ---
+            if(keys.w) physics.cSpeed += 25 * dt;
+            if(keys.s) physics.cSpeed -= 25 * dt;
+            if(keys.sp) physics.cSpeed *= 0.95; 
+            physics.cSpeed *= 0.98;
+
+            // Calculate rotation
+            if(Math.abs(physics.cSpeed) > 0.1) {
+                myCar.rotation.y += (keys.a - keys.d) * Math.abs(physics.cSpeed) * 0.05 * dt;
+            }
+
+            // Calculate proposed move
+            const moveDist = physics.cSpeed * dt;
+            const forward = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0,1,0), myCar.rotation.y);
+            const proposedPos = myCar.position.clone().add(forward.multiplyScalar(moveDist));
+
+            // CAR COLLISION CHECK
+            // We use a radius of 2.0 for the car (approx size)
+            if(checkCollision(proposedPos, 1.8)) {
+                // CRASH!
+                playSound('crash');
+                physics.cSpeed *= -0.5; // Bounce back
+                
+                // Visual Flash
+                const flash = document.getElementById('crash-flash');
+                flash.style.opacity = 0.8;
+                setTimeout(() => flash.style.opacity = 0, 100);
+            } else {
+                // No collision, apply move
+                myCar.position.copy(proposedPos);
+            }
+
+            // Camera Chase
+            const camOffset = new THREE.Vector3(0, 5, -10).applyMatrix4(myCar.matrixWorld);
+            camera.position.lerp(camOffset, 0.1);
+            camera.lookAt(myCar.position);
+            playerMesh.position.copy(myCar.position); // Sync player
+
+        } else if(controls.isLocked) {
+            // --- PLAYER PHYSICS & COLLISION ---
+            const speed = keys.sh ? 16 : 8;
+            
+            // Calculate movement direction relative to camera
+            const camDir = new THREE.Vector3(); camera.getWorldDirection(camDir); camDir.y = 0; camDir.normalize();
+            const camRight = new THREE.Vector3(-camDir.z, 0, camDir.x);
+            
+            // Separate X and Z movement for "Sliding" along walls
+            const inputX = Number(keys.d) - Number(keys.a);
+            const inputZ = Number(keys.w) - Number(keys.s);
+
+            // 1. Try Moving X/Z combined vector
+            // We do manual velocity integration for collision sliding
+            const velocity = new THREE.Vector3()
+                .addScaledVector(camDir, inputZ)
+                .addScaledVector(camRight, inputX)
+                .normalize()
+                .multiplyScalar(speed * dt);
+
+            // Attempt X Move
+            const proposedX = playerMesh.position.clone();
+            proposedX.x += velocity.x;
+            if(!checkCollision(proposedX, 0.5)) {
+                playerMesh.position.x += velocity.x;
+            }
+
+            // Attempt Z Move
+            const proposedZ = playerMesh.position.clone();
+            proposedZ.z += velocity.z;
+            if(!checkCollision(proposedZ, 0.5)) {
+                playerMesh.position.z += velocity.z;
+            }
+
+            // Gravity
+            physics.pVel.y -= 20 * dt;
+            playerMesh.position.y += physics.pVel.y * dt;
+            
+            if(playerMesh.position.y <= 0.9) {
+                playerMesh.position.y = 0.9;
+                physics.pVel.y = 0;
+                if(keys.sp) physics.pVel.y = 10;
+            }
+
+            // Camera follows player head
+            camera.position.copy(playerMesh.position).add(new THREE.Vector3(0, 0.8, 0));
+        }
+
+        // --- MINIMAP ---
+        const map = document.getElementById('minimap-content');
+        map.innerHTML = '';
+        const pBlip = document.createElement('div');
+        pBlip.className = 'map-icon'; pBlip.style.background = '#f1c40f';
+        pBlip.style.left = '50%'; pBlip.style.top = '50%';
+        map.appendChild(pBlip);
+        
+        // Draw Car Blip on Map
+        const center = state.inCar ? myCar.position : playerMesh.position;
+        const dx = myCar.position.x - center.x;
+        const dz = myCar.position.z - center.z;
+        if(Math.abs(dx)<100 && Math.abs(dz)<70 && !state.inCar) {
+            const blip = document.createElement('div');
+            blip.className = 'map-icon'; blip.style.background = '#fff';
+            blip.style.left = (100 + dx) + 'px'; blip.style.top = (70 + dz) + 'px';
+            map.appendChild(blip);
+        }
+
+        renderer.render(scene, camera);
+    }
+
+    animate();
+    
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth/window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+</script>
+</body>
+</html>
